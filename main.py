@@ -1,28 +1,27 @@
 import asyncio
 import random
+import json
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ====== Insert your data here ======
-TOKEN = "YOUR_BOT_TOKEN_HERE"
-OWNER_ID = 123456789  # Your Telegram user ID
-# ===================================
+TOKEN = "YOUR_BOT_TOKEN"
+OWNER_ID = 123456789
+CHANNEL_ID = -100123456789
+DATA_FILE = "snow_data.json"
 
-WIDTH = 40
-HEIGHT = 10
+WIDTH = 60
+HEIGHT = 15
 SNOWFLAKE = "*"
-INTERVAL = 2  # seconds
+INTERVAL = 4.0
 
-# Global vars
 frames = []
 current_message = None
 running = False
+message_id = None
 
 def generate_frames():
-    snow_positions = []
-    for _ in range(WIDTH):
-        snow_positions.append(random.randint(0, HEIGHT - 1))
-
+    snow_positions = [random.randint(0, HEIGHT - 1) for _ in range(WIDTH)]
     result = []
     for frame_num in range(HEIGHT * 2):
         frame = [[" " for _ in range(WIDTH)] for _ in range(HEIGHT)]
@@ -33,56 +32,66 @@ def generate_frames():
         result.append(frame_str)
     return result
 
+def save_data():
+    with open(DATA_FILE, "w") as f:
+        json.dump({"message_id": message_id}, f)
+
+def load_data():
+    global message_id
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            data = json.load(f)
+            message_id = data.get("message_id")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔ You are not allowed to use this bot.")
         return
-    await update.message.reply_text("Use /snow to start the snow animation.")
+    await update.message.reply_text("Bot is ready.")
 
-async def snow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global running, frames, current_message
+async def channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_message, frames, running, message_id
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔ You are not allowed to use this bot.")
         return
-    if running:
-        await update.message.reply_text("❄ Snow animation is already running.")
-        return
-
-    running = True
     frames = generate_frames()
-    current_message = await update.message.reply_text(frames[0], parse_mode="MarkdownV2")
-    asyncio.create_task(animate(update.effective_chat.id, context))
+    current_message = await context.bot.send_message(CHANNEL_ID, frames[0], parse_mode="MarkdownV2")
+    message_id = current_message.message_id
+    save_data()
+    running = True
+    asyncio.create_task(animate(CHANNEL_ID, context))
 
 async def animate(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    global running, current_message
-    try:
-        frame_index = 0
-        while running:
-            try:
-                frame_index = (frame_index + 1) % len(frames)
-                await current_message.edit_text(frames[frame_index], parse_mode="MarkdownV2")
+    global running, current_message, message_id
+    frame_index = 0
+    while running:
+        try:
+            frame_index = (frame_index + 1) % len(frames)
+            await context.bot.edit_message_text(frames[frame_index], chat_id, message_id, parse_mode="MarkdownV2")
+            await asyncio.sleep(INTERVAL)
+        except Exception as e:
+            if "Retry after" in str(e):
+                wait_time = int(str(e).split("Retry after")[1].split()[0])
+                await asyncio.sleep(wait_time)
+            else:
                 await asyncio.sleep(INTERVAL)
-            except Exception as e:
-                if "Retry after" in str(e):
-                    wait_time = int(str(e).split("Retry after")[1].split()[0])
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"Edit error: {e}")
-                    await asyncio.sleep(INTERVAL)
-    except asyncio.CancelledError:
-        pass
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global running
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔ You are not allowed to use this bot.")
         return
     running = False
-    await update.message.reply_text("❄ Snow animation stopped.")
+
+async def on_startup(app: Application):
+    global frames, current_message, running
+    load_data()
+    if message_id:
+        frames = generate_frames()
+        running = True
+        asyncio.create_task(animate(CHANNEL_ID, app))
 
 if __name__ == "__main__":
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("snow", snow))
+    app.add_handler(CommandHandler("channel", channel))
     app.add_handler(CommandHandler("stop", stop))
+    app.post_init = on_startup
     app.run_polling()
